@@ -220,52 +220,68 @@ class JsonSchemaGenerator implements Generator
     protected function applyMaxConstraint(Max $attr, array &$schema): void
     {
         $type = $schema['type'] ?? null;
+        $value = $attr->parameters()[0] ?? null;
+
+        if ($value === null) {
+            return;
+        }
 
         if ($type === 'string' || (is_array($type) && in_array('string', $type))) {
-            $schema['maxLength'] = $attr->max;
+            $schema['maxLength'] = $value;
         }
 
         if ($type === 'integer' || $type === 'number' || (is_array($type) && (in_array('integer', $type) || in_array('number', $type)))) {
-            $schema['maximum'] = $attr->max;
+            $schema['maximum'] = $value;
         }
 
         if ($type === 'array' || (is_array($type) && in_array('array', $type))) {
-            $schema['maxItems'] = $attr->max;
+            $schema['maxItems'] = $value;
         }
     }
 
     protected function applyMinConstraint(Min $attr, array &$schema): void
     {
         $type = $schema['type'] ?? null;
+        $value = $attr->parameters()[0] ?? null;
+
+        if ($value === null) {
+            return;
+        }
 
         if ($type === 'string' || (is_array($type) && in_array('string', $type))) {
-            $schema['minLength'] = $attr->min;
+            $schema['minLength'] = $value;
         }
 
         if ($type === 'integer' || $type === 'number' || (is_array($type) && (in_array('integer', $type) || in_array('number', $type)))) {
-            $schema['minimum'] = $attr->min;
+            $schema['minimum'] = $value;
         }
 
         if ($type === 'array' || (is_array($type) && in_array('array', $type))) {
-            $schema['minItems'] = $attr->min;
+            $schema['minItems'] = $value;
         }
     }
 
     protected function applyBetweenConstraint(Between $attr, array &$schema): void
     {
         $type = $schema['type'] ?? null;
+        $params = $attr->parameters();
+
+        if (count($params) < 2) {
+            return;
+        }
 
         if ($type === 'integer' || $type === 'number' || (is_array($type) && (in_array('integer', $type) || in_array('number', $type)))) {
-            $schema['minimum'] = $attr->min;
-            $schema['maximum'] = $attr->max;
+            $schema['minimum'] = $params[0];
+            $schema['maximum'] = $params[1];
         }
     }
 
     protected function applyEnumConstraint(Enum $attr, array &$schema): void
     {
-        $enumClass = $attr->enumClass;
+        $params = $attr->parameters();
+        $enumClass = $params[0] ?? null;
 
-        if (enum_exists($enumClass) && is_subclass_of($enumClass, BackedEnum::class)) {
+        if ($enumClass && enum_exists($enumClass) && is_subclass_of($enumClass, BackedEnum::class)) {
             $schema['enum'] = array_map(
                 fn (BackedEnum $case) => $case->value,
                 $enumClass::cases()
