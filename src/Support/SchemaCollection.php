@@ -6,7 +6,7 @@ use Illuminate\Support\Collection;
 
 class SchemaCollection extends Collection
 {
-    public function add(GeneratedSchema $schema): self
+    public function addSchema(GeneratedSchema $schema): self
     {
         $this->items[] = $schema;
 

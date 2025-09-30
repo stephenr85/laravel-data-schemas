@@ -28,7 +28,7 @@ class GenerateSchemasAction
                     $schema = $generator->generate($class);
                     $outputPath = $this->pathGenerator->getSchemaPath($class);
 
-                    $collection->add(new GeneratedSchema(
+                    $collection->addSchema(new GeneratedSchema(
                         className: $class->getName(),
                         outputPath: $outputPath,
                         schema: $schema
