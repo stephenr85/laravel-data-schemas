@@ -278,10 +278,14 @@ class JsonSchemaGenerator implements Generator
 
     protected function applyEnumConstraint(Enum $attr, array &$schema): void
     {
-        $params = $attr->parameters();
-        $enumClass = $params[0] ?? null;
+        // Use reflection to access protected $enum property
+        $reflection = new \ReflectionClass($attr);
+        $enumProperty = $reflection->getProperty('enum');
+        $enumProperty->setAccessible(true);
+        $enumClass = $enumProperty->getValue($attr);
 
-        if ($enumClass && enum_exists($enumClass) && is_subclass_of($enumClass, BackedEnum::class)) {
+        // Handle string enum class names
+        if (is_string($enumClass) && enum_exists($enumClass) && is_subclass_of($enumClass, BackedEnum::class)) {
             $schema['enum'] = array_map(
                 fn (BackedEnum $case) => $case->value,
                 $enumClass::cases()
