@@ -3,28 +3,66 @@
 namespace Rushing\LaravelDataSchemas\Generators;
 
 use BackedEnum;
+use DateTimeInterface;
 use ReflectionAttribute;
 use ReflectionClass;
+use ReflectionEnum;
 use ReflectionNamedType;
 use ReflectionProperty;
 use ReflectionUnionType;
 use Rushing\LaravelDataSchemas\Attributes\Description;
 use Rushing\LaravelDataSchemas\Attributes\Example;
-use Spatie\LaravelData\Attributes\Validation\ArrayType;
 use Spatie\LaravelData\Attributes\Validation\Between;
 use Spatie\LaravelData\Attributes\Validation\Email;
 use Spatie\LaravelData\Attributes\Validation\Enum;
 use Spatie\LaravelData\Attributes\Validation\Max;
 use Spatie\LaravelData\Attributes\Validation\Min;
-use Spatie\LaravelData\Attributes\Validation\Nullable;
 use Spatie\LaravelData\Attributes\Validation\Url;
 use Spatie\LaravelData\Attributes\Validation\Uuid;
 use Spatie\LaravelData\Attributes\Validation\ValidationAttribute;
 use Spatie\LaravelData\Data;
+use Spatie\LaravelData\DataCollection;
+use Spatie\LaravelData\Lazy;
+use Spatie\LaravelData\Optional;
 
 class JsonSchemaGenerator implements Generator
 {
-    public function __construct(protected array $config) {}
+    /** @var string collapsed|request|response */
+    protected string $mode = 'collapsed';
+
+    /**
+     * Definitions hoisted for the document currently being generated.
+     *
+     * @var array<string, array>
+     */
+    protected array $defs = [];
+
+    /**
+     * Short names already being (or already) generated — guards self-references.
+     *
+     * @var array<string, true>
+     */
+    protected array $visited = [];
+
+    public function __construct(protected array $config = []) {}
+
+    public function forRequest(): static
+    {
+        return $this->mode('request');
+    }
+
+    public function forResponse(): static
+    {
+        return $this->mode('response');
+    }
+
+    public function mode(string $mode): static
+    {
+        $clone = clone $this;
+        $clone->mode = $mode;
+
+        return $clone;
+    }
 
     public function canGenerate(ReflectionClass $class): bool
     {
@@ -33,36 +71,48 @@ class JsonSchemaGenerator implements Generator
 
     public function generate(ReflectionClass $class): array
     {
-        $properties = $class->getProperties(ReflectionProperty::IS_PUBLIC);
+        $this->defs = [];
+        $this->visited = [];
+
+        $schema = $this->buildObjectSchema($class);
+
+        // Metadata only decorates the root document.
+        if ($this->config['schema_metadata']['$schema'] ?? false) {
+            $schema = ['$schema' => $this->config['schema_version'] ?? 'https://json-schema.org/draft/2020-12/schema'] + $schema;
+        }
+        if ($this->config['schema_metadata']['$id'] ?? false) {
+            $schema['$id'] = $this->generateId($class);
+        }
+
+        if (! empty($this->defs)) {
+            $schema['$defs'] = $this->defs;
+        }
+
+        return $schema;
+    }
+
+    protected function buildObjectSchema(ReflectionClass $class): array
+    {
         $schema = [
             'type' => 'object',
             'title' => $class->getShortName(),
             'properties' => [],
         ];
 
-        // Add $schema if configured
-        if ($this->config['schema_metadata']['$schema'] ?? false) {
-            $schema['$schema'] = $this->config['schema_version'];
-        }
-
-        // Add $id if configured
-        if ($this->config['schema_metadata']['$id'] ?? false) {
-            $schema['$id'] = $this->generateId($class);
-        }
-
-        // Add class-level description if available
-        $classDescription = $this->getClassDescription($class);
-        if ($classDescription) {
-            $schema['description'] = $classDescription;
+        if ($description = $this->getClassDescription($class)) {
+            $schema['description'] = $description;
         }
 
         $required = [];
 
-        foreach ($properties as $property) {
-            $propertySchema = $this->generatePropertySchema($property);
-            $schema['properties'][$property->getName()] = $propertySchema;
+        foreach ($class->getProperties(ReflectionProperty::IS_PUBLIC) as $property) {
+            if ($property->isStatic()) {
+                continue;
+            }
 
-            if (! $this->isNullable($property)) {
+            $schema['properties'][$property->getName()] = $this->generatePropertySchema($property);
+
+            if ($this->isRequired($property)) {
                 $required[] = $property->getName();
             }
         }
@@ -72,6 +122,303 @@ class JsonSchemaGenerator implements Generator
         }
 
         return $schema;
+    }
+
+    protected function generatePropertySchema(ReflectionProperty $property): array
+    {
+        $info = $this->analyzeType($property);
+
+        $schema = [];
+
+        if ($info['ref'] !== null) {
+            $schema['$ref'] = '#/$defs/'.$info['ref'];
+            if ($info['nullable']) {
+                $schema['nullable'] = true;
+            }
+        } elseif ($info['arrayItemRef'] !== null) {
+            $schema['type'] = 'array';
+            $schema['items'] = ['$ref' => '#/$defs/'.$info['arrayItemRef']];
+            if ($info['nullable']) {
+                $schema['type'] = ['array', 'null'];
+            }
+        } else {
+            $types = $info['jsonTypes'];
+            if ($info['nullable'] && ! in_array('null', $types, true)) {
+                $types[] = 'null';
+            }
+            $types = array_values(array_unique($types));
+            if (count($types) === 1) {
+                $schema['type'] = $types[0];
+            } elseif (count($types) > 1) {
+                $schema['type'] = $types;
+            }
+        }
+
+        // Lazy => present in responses only when included.
+        if ($info['lazy']) {
+            $schema['readOnly'] = true;
+            $schema['x-lazy'] = true;
+        }
+
+        // Optional => key may be absent from input.
+        if ($info['optional']) {
+            $schema['x-optional'] = true;
+        }
+
+        if (! empty($descAttrs = $property->getAttributes(Description::class))) {
+            $schema['description'] = $descAttrs[0]->newInstance()->value;
+        }
+
+        $this->mapValidationAttributes($property, $schema);
+
+        // Examples: explicit #[Example] wins, otherwise infer a baseline for leaves.
+        $exampleAttrs = $property->getAttributes(Example::class);
+        if (! empty($exampleAttrs)) {
+            $schema['examples'] = array_map(
+                fn (ReflectionAttribute $attr) => $attr->newInstance()->value,
+                $exampleAttrs
+            );
+        } elseif ($info['ref'] === null && $info['arrayItemRef'] === null) {
+            $inferred = $this->inferExample($schema);
+            if ($inferred !== null) {
+                $schema['examples'] = [$inferred];
+            }
+        }
+
+        return $schema;
+    }
+
+    /**
+     * Walk a property's type union member-by-member, resolving wrapper tokens,
+     * nullability, nested refs and a scalar fallback.
+     *
+     * @return array{jsonTypes: string[], ref: ?string, arrayItemRef: ?string, nullable: bool, optional: bool, lazy: bool}
+     */
+    protected function analyzeType(ReflectionProperty $property): array
+    {
+        $type = $property->getType();
+        $members = match (true) {
+            $type instanceof ReflectionUnionType => $type->getTypes(),
+            $type instanceof ReflectionNamedType => [$type],
+            default => [],
+        };
+
+        $jsonTypes = [];
+        $ref = null;
+        $arrayItemRef = null;
+        $nullable = false;
+        $optional = false;
+        $lazy = false;
+        $hasArray = false;
+
+        foreach ($members as $member) {
+            if (! $member instanceof ReflectionNamedType) {
+                continue;
+            }
+
+            $name = $member->getName();
+
+            if ($member->allowsNull()) {
+                $nullable = true;
+            }
+
+            if ($name === 'null') {
+                $nullable = true;
+
+                continue;
+            }
+
+            if ($name === Optional::class) {
+                $optional = true;
+
+                continue;
+            }
+
+            if ($name === Lazy::class) {
+                $lazy = true;
+
+                continue;
+            }
+
+            if ($member->isBuiltin()) {
+                if ($name === 'array') {
+                    $hasArray = true;
+
+                    continue;
+                }
+                $jsonTypes[] = $this->mapBuiltin($name);
+
+                continue;
+            }
+
+            // Class-typed member.
+            if (is_subclass_of($name, Data::class)) {
+                $ref = $this->ensureDef(new ReflectionClass($name));
+
+                continue;
+            }
+
+            if (is_subclass_of($name, BackedEnum::class)) {
+                $ref = $this->ensureEnumDef($name);
+
+                continue;
+            }
+
+            if (is_a($name, DataCollection::class, true)) {
+                $hasArray = true;
+
+                continue;
+            }
+
+            if (is_a($name, DateTimeInterface::class, true)) {
+                $jsonTypes[] = 'string';
+
+                continue;
+            }
+
+            // Unknown class — degrade to string rather than crash.
+            $jsonTypes[] = 'string';
+        }
+
+        // A #[DataCollectionOf] attribute names the element type of an array/collection.
+        $itemClass = $this->dataCollectionItemClass($property);
+        if ($itemClass !== null) {
+            $arrayItemRef = $this->ensureDef(new ReflectionClass($itemClass));
+        } elseif ($hasArray) {
+            $jsonTypes[] = 'array';
+        }
+
+        return [
+            'jsonTypes' => $jsonTypes,
+            'ref' => $ref,
+            'arrayItemRef' => $arrayItemRef,
+            'nullable' => $nullable,
+            'optional' => $optional,
+            'lazy' => $lazy,
+        ];
+    }
+
+    protected function dataCollectionItemClass(ReflectionProperty $property): ?string
+    {
+        $class = 'Spatie\\LaravelData\\Attributes\\DataCollectionOf';
+        if (! class_exists($class)) {
+            return null;
+        }
+
+        $attrs = $property->getAttributes($class);
+        if (empty($attrs)) {
+            return null;
+        }
+
+        $args = $attrs[0]->getArguments();
+        $value = $args[0] ?? ($args['class'] ?? null);
+
+        if (is_string($value) && (class_exists($value) || enum_exists($value))) {
+            return $value;
+        }
+
+        return null;
+    }
+
+    /**
+     * Hoist a nested Data class into $defs and return its short-name key.
+     */
+    protected function ensureDef(ReflectionClass $class): string
+    {
+        $short = $class->getShortName();
+
+        if (isset($this->visited[$short])) {
+            return $short;
+        }
+
+        // Mark before recursing so self-references resolve to the same key.
+        $this->visited[$short] = true;
+        $this->defs[$short] = $this->buildObjectSchema($class);
+
+        return $short;
+    }
+
+    protected function ensureEnumDef(string $enumClass): string
+    {
+        $short = (new ReflectionClass($enumClass))->getShortName();
+
+        if (isset($this->visited[$short])) {
+            return $short;
+        }
+        $this->visited[$short] = true;
+
+        $reflection = new ReflectionEnum($enumClass);
+        $backingType = $reflection->getBackingType()?->getName();
+
+        $this->defs[$short] = [
+            'type' => $backingType === 'int' ? 'integer' : 'string',
+            'title' => $short,
+            'enum' => array_map(fn (BackedEnum $case) => $case->value, $enumClass::cases()),
+        ];
+
+        return $short;
+    }
+
+    protected function mapBuiltin(string $name): string
+    {
+        return match ($name) {
+            'int' => 'integer',
+            'float' => 'number',
+            'bool' => 'boolean',
+            'string' => 'string',
+            'object' => 'object',
+            'iterable' => 'array',
+            default => 'string',
+        };
+    }
+
+    protected function isRequired(ReflectionProperty $property): bool
+    {
+        if ($property->hasDefaultValue()) {
+            return false;
+        }
+
+        $info = $this->analyzeType($property);
+
+        // Optional and Lazy are absent from required; plain nullable stays required.
+        if ($info['optional'] || $info['lazy']) {
+            return false;
+        }
+
+        return true;
+    }
+
+    protected function inferExample(array $schema): mixed
+    {
+        $format = $schema['format'] ?? null;
+        $example = match ($format) {
+            'email' => 'user@example.com',
+            'uri' => 'https://example.com',
+            'uuid' => '00000000-0000-0000-0000-000000000000',
+            'date-time' => '2024-01-01T00:00:00Z',
+            default => null,
+        };
+        if ($example !== null) {
+            return $example;
+        }
+
+        if (! empty($schema['enum'])) {
+            return $schema['enum'][0];
+        }
+
+        $type = $schema['type'] ?? null;
+        if (is_array($type)) {
+            $type = $type[0] ?? null;
+        }
+
+        return match ($type) {
+            'string' => 'string',
+            'integer' => 0,
+            'number' => 0,
+            'boolean' => true,
+            'array' => [],
+            default => null,
+        };
     }
 
     protected function generateId(ReflectionClass $class): string
@@ -86,101 +433,6 @@ class JsonSchemaGenerator implements Generator
         return ! empty($descAttrs) ? $descAttrs[0]->newInstance()->value : null;
     }
 
-    protected function generatePropertySchema(ReflectionProperty $property): array
-    {
-        $schema = [];
-
-        // Determine JSON Schema type(s)
-        $types = $this->resolveJsonTypes($property);
-        if (count($types) === 1) {
-            $schema['type'] = $types[0];
-        } elseif (count($types) > 1) {
-            $schema['type'] = $types;
-        }
-
-        // Add description from custom attribute
-        $descAttrs = $property->getAttributes(Description::class);
-        if (! empty($descAttrs)) {
-            $schema['description'] = $descAttrs[0]->newInstance()->value;
-        }
-
-        // Add examples from custom attribute
-        $exampleAttrs = $property->getAttributes(Example::class);
-        if (! empty($exampleAttrs)) {
-            $schema['examples'] = array_map(
-                fn (ReflectionAttribute $attr) => $attr->newInstance()->value,
-                $exampleAttrs
-            );
-        }
-
-        // Map validation attributes to JSON Schema constraints
-        $this->mapValidationAttributes($property, $schema);
-
-        return $schema;
-    }
-
-    protected function resolveJsonTypes(ReflectionProperty $property): array
-    {
-        $type = $property->getType();
-        $types = [];
-
-        if ($type instanceof ReflectionUnionType) {
-            foreach ($type->getTypes() as $unionType) {
-                $types = array_merge($types, $this->mapPhpTypeToJsonSchema($unionType));
-            }
-        } elseif ($type instanceof ReflectionNamedType) {
-            $types = $this->mapPhpTypeToJsonSchema($type);
-        }
-
-        // Check for ArrayType validation attribute
-        $arrayTypeAttrs = $property->getAttributes(ArrayType::class, ReflectionAttribute::IS_INSTANCEOF);
-        if (! empty($arrayTypeAttrs) && ! in_array('array', $types)) {
-            $types[] = 'array';
-        }
-
-        return array_unique($types);
-    }
-
-    protected function mapPhpTypeToJsonSchema(ReflectionNamedType $type): array
-    {
-        $typeName = $type->getName();
-        $types = [];
-
-        $types[] = match ($typeName) {
-            'int' => 'integer',
-            'float' => 'number',
-            'bool' => 'boolean',
-            'string' => 'string',
-            'array' => 'array',
-            'object' => 'object',
-            'null' => 'null',
-            default => 'string', // Default for unknown types
-        };
-
-        if ($type->allowsNull() && ! in_array('null', $types)) {
-            $types[] = 'null';
-        }
-
-        return $types;
-    }
-
-    protected function isNullable(ReflectionProperty $property): bool
-    {
-        // Check if property has Nullable attribute
-        $nullableAttrs = $property->getAttributes(Nullable::class, ReflectionAttribute::IS_INSTANCEOF);
-        if (! empty($nullableAttrs)) {
-            return true;
-        }
-
-        // Check if type allows null
-        $type = $property->getType();
-        if ($type && $type->allowsNull()) {
-            return true;
-        }
-
-        return false;
-    }
-
     protected function mapValidationAttributes(ReflectionProperty $property, array &$schema): void
     {
         $validationAttrs = $property->getAttributes(
@@ -192,7 +444,6 @@ class JsonSchemaGenerator implements Generator
             $instance = $attr->newInstance();
             $attrClass = get_class($instance);
 
-            // Check for custom mapping
             $customMapping = $this->config['validation_mapping'][$attrClass] ?? null;
             if (is_callable($customMapping)) {
                 $result = $customMapping($instance);
@@ -203,7 +454,6 @@ class JsonSchemaGenerator implements Generator
                 continue;
             }
 
-            // Default mappings
             match ($attrClass) {
                 Max::class => $this->applyMaxConstraint($instance, $schema),
                 Min::class => $this->applyMinConstraint($instance, $schema),
@@ -217,60 +467,57 @@ class JsonSchemaGenerator implements Generator
         }
     }
 
-    protected function applyMaxConstraint(Max $attr, array &$schema): void
+    protected function schemaHasType(array $schema, string $needle): bool
     {
         $type = $schema['type'] ?? null;
-        $value = $attr->parameters()[0] ?? null;
 
+        return $type === $needle || (is_array($type) && in_array($needle, $type, true));
+    }
+
+    protected function applyMaxConstraint(Max $attr, array &$schema): void
+    {
+        $value = $attr->parameters()[0] ?? null;
         if ($value === null) {
             return;
         }
 
-        if ($type === 'string' || (is_array($type) && in_array('string', $type))) {
+        if ($this->schemaHasType($schema, 'string')) {
             $schema['maxLength'] = $value;
         }
-
-        if ($type === 'integer' || $type === 'number' || (is_array($type) && (in_array('integer', $type) || in_array('number', $type)))) {
+        if ($this->schemaHasType($schema, 'integer') || $this->schemaHasType($schema, 'number')) {
             $schema['maximum'] = $value;
         }
-
-        if ($type === 'array' || (is_array($type) && in_array('array', $type))) {
+        if ($this->schemaHasType($schema, 'array')) {
             $schema['maxItems'] = $value;
         }
     }
 
     protected function applyMinConstraint(Min $attr, array &$schema): void
     {
-        $type = $schema['type'] ?? null;
         $value = $attr->parameters()[0] ?? null;
-
         if ($value === null) {
             return;
         }
 
-        if ($type === 'string' || (is_array($type) && in_array('string', $type))) {
+        if ($this->schemaHasType($schema, 'string')) {
             $schema['minLength'] = $value;
         }
-
-        if ($type === 'integer' || $type === 'number' || (is_array($type) && (in_array('integer', $type) || in_array('number', $type)))) {
+        if ($this->schemaHasType($schema, 'integer') || $this->schemaHasType($schema, 'number')) {
             $schema['minimum'] = $value;
         }
-
-        if ($type === 'array' || (is_array($type) && in_array('array', $type))) {
+        if ($this->schemaHasType($schema, 'array')) {
             $schema['minItems'] = $value;
         }
     }
 
     protected function applyBetweenConstraint(Between $attr, array &$schema): void
     {
-        $type = $schema['type'] ?? null;
         $params = $attr->parameters();
-
         if (count($params) < 2) {
             return;
         }
 
-        if ($type === 'integer' || $type === 'number' || (is_array($type) && (in_array('integer', $type) || in_array('number', $type)))) {
+        if ($this->schemaHasType($schema, 'integer') || $this->schemaHasType($schema, 'number')) {
             $schema['minimum'] = $params[0];
             $schema['maximum'] = $params[1];
         }
@@ -278,13 +525,11 @@ class JsonSchemaGenerator implements Generator
 
     protected function applyEnumConstraint(Enum $attr, array &$schema): void
     {
-        // Use reflection to access protected $enum property
-        $reflection = new \ReflectionClass($attr);
+        $reflection = new ReflectionClass($attr);
         $enumProperty = $reflection->getProperty('enum');
         $enumProperty->setAccessible(true);
         $enumClass = $enumProperty->getValue($attr);
 
-        // Handle string enum class names
         if (is_string($enumClass) && enum_exists($enumClass) && is_subclass_of($enumClass, BackedEnum::class)) {
             $schema['enum'] = array_map(
                 fn (BackedEnum $case) => $case->value,
