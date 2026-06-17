@@ -24,7 +24,13 @@ interface Generator
     public function forResponse(): static;
 
     /**
-     * Set the generation mode explicitly. Known modes: collapsed, request, response.
+     * Return a variant configured to emit a strict LLM structured-output schema
+     * (every property required, optionals made nullable, additionalProperties:false).
      */
-    public function mode(string $mode): static;
+    public function forLlmStrict(): static;
+
+    /**
+     * Set the generation mode explicitly. Known modes: collapsed, request, response, llm_strict.
+     */
+    public function schemaMode(string $mode): static;
 }

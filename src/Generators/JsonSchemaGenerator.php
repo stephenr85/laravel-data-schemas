@@ -27,7 +27,7 @@ use Spatie\LaravelData\Optional;
 
 class JsonSchemaGenerator implements Generator
 {
-    /** @var string collapsed|request|response */
+    /** @var string collapsed|request|response|llm_strict */
     protected string $mode = 'collapsed';
 
     /**
@@ -48,15 +48,27 @@ class JsonSchemaGenerator implements Generator
 
     public function forRequest(): static
     {
-        return $this->mode('request');
+        return $this->schemaMode('request');
     }
 
     public function forResponse(): static
     {
-        return $this->mode('response');
+        return $this->schemaMode('response');
     }
 
-    public function mode(string $mode): static
+    /**
+     * Emit a schema compatible with strict LLM structured output (OpenAI/others):
+     * every object sets `additionalProperties: false` and lists every property in
+     * `required`, with properties that would otherwise be optional made nullable
+     * (their type union gains `"null"`, refs become `anyOf [ref, null]`) instead of
+     * omitted. Root `$schema`/`$id` metadata is dropped — providers reject it.
+     */
+    public function forLlmStrict(): static
+    {
+        return $this->schemaMode('llm_strict');
+    }
+
+    public function schemaMode(string $mode): static
     {
         $clone = clone $this;
         $clone->mode = $mode;
@@ -76,12 +88,15 @@ class JsonSchemaGenerator implements Generator
 
         $schema = $this->buildObjectSchema($class);
 
-        // Metadata only decorates the root document.
-        if ($this->config['schema_metadata']['$schema'] ?? false) {
-            $schema = ['$schema' => $this->config['schema_version'] ?? 'https://json-schema.org/draft/2020-12/schema'] + $schema;
-        }
-        if ($this->config['schema_metadata']['$id'] ?? false) {
-            $schema['$id'] = $this->generateId($class);
+        // Strict LLM schemas must not carry $schema/$id metadata — providers reject it.
+        if ($this->mode !== 'llm_strict') {
+            // Metadata only decorates the root document.
+            if ($this->config['schema_metadata']['$schema'] ?? false) {
+                $schema = ['$schema' => $this->config['schema_version'] ?? 'https://json-schema.org/draft/2020-12/schema'] + $schema;
+            }
+            if ($this->config['schema_metadata']['$id'] ?? false) {
+                $schema['$id'] = $this->generateId($class);
+            }
         }
 
         if (! empty($this->defs)) {
@@ -117,8 +132,61 @@ class JsonSchemaGenerator implements Generator
             }
         }
 
+        if ($this->mode === 'llm_strict') {
+            // Strict providers require additionalProperties:false and every property in
+            // `required`; properties that would be optional are made nullable instead.
+            // They also reject unsupported keywords like `examples`.
+            $schema['additionalProperties'] = false;
+
+            foreach ($schema['properties'] as $name => $propSchema) {
+                // Strip keywords strict providers reject (examples) or that we re-express
+                // through the type union / anyOf below (x-optional, x-lazy, readOnly, nullable).
+                unset($propSchema['examples'], $propSchema['x-optional'], $propSchema['x-lazy'], $propSchema['readOnly'], $propSchema['nullable']);
+
+                if (! in_array($name, $required, true)) {
+                    $propSchema = $this->makeNullable($propSchema);
+                }
+
+                $schema['properties'][$name] = $propSchema;
+            }
+
+            $required = array_keys($schema['properties']);
+        }
+
         if (! empty($required)) {
             $schema['required'] = $required;
+        }
+
+        return $schema;
+    }
+
+    /**
+     * Make a property schema accept null, for strict LLM mode.
+     *
+     * @param  array<string, mixed>  $schema
+     * @return array<string, mixed>
+     */
+    protected function makeNullable(array $schema): array
+    {
+        if (isset($schema['$ref'])) {
+            $ref = $schema['$ref'];
+            unset($schema['$ref'], $schema['nullable']);
+
+            return ['anyOf' => [['$ref' => $ref], ['type' => 'null']]] + $schema;
+        }
+
+        unset($schema['nullable']);
+        $type = $schema['type'] ?? null;
+
+        if ($type === null) {
+            $schema['type'] = 'null';
+        } elseif (is_array($type)) {
+            if (! in_array('null', $type, true)) {
+                $type[] = 'null';
+            }
+            $schema['type'] = array_values($type);
+        } else {
+            $schema['type'] = [$type, 'null'];
         }
 
         return $schema;

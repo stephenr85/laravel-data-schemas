@@ -178,4 +178,44 @@ class JsonSchemaGeneratorTest extends TestCase
             $generator->forResponse()->generate($reflection)
         );
     }
+
+    public function test_for_llm_strict_emits_a_strict_compatible_schema(): void
+    {
+        $schema = (new JsonSchemaGenerator)->forLlmStrict()->generate(new ReflectionClass(SampleData::class));
+
+        // Every object forbids extra properties and lists every property in `required`.
+        $this->assertFalse($schema['additionalProperties']);
+        $this->assertEqualsCanonicalizing(
+            ['title', 'email', 'uuid', 'bio', 'nickname', 'user', 'status', 'collaborators'],
+            $schema['required']
+        );
+
+        // Optional properties are made nullable rather than omitted.
+        $this->assertEquals(['string', 'null'], $schema['properties']['nickname']['type']);
+
+        // An optional ref becomes anyOf [ref, null].
+        $this->assertEquals(
+            [['$ref' => '#/$defs/UserData'], ['type' => 'null']],
+            $schema['properties']['user']['anyOf']
+        );
+
+        // Nested $defs are strict too.
+        $this->assertFalse($schema['$defs']['UserData']['additionalProperties']);
+
+        // Keywords strict providers reject are stripped everywhere.
+        $json = json_encode($schema);
+        foreach (['examples', 'x-optional', 'x-lazy', 'readOnly', 'nullable'] as $keyword) {
+            $this->assertStringNotContainsString($keyword, $json);
+        }
+    }
+
+    public function test_for_llm_strict_does_not_emit_root_metadata(): void
+    {
+        $schema = (new JsonSchemaGenerator(['schema_metadata' => ['$schema' => true, '$id' => true]]))
+            ->forLlmStrict()
+            ->generate(new ReflectionClass(SampleData::class));
+
+        $this->assertArrayNotHasKey('$schema', $schema);
+        $this->assertArrayNotHasKey('$id', $schema);
+    }
 }
