@@ -225,11 +225,12 @@ class JsonSchemaGenerator implements Generator
         }
 
         // Scalar array item type (string[], int[], …) via #[ArrayItems] — strict
-        // providers require `items` on every array.
+        // providers require `items` on every array. A backed-enum class as the item
+        // type inlines its values (a list of enum-valued scalars).
         if ($info['arrayItemRef'] === null && $this->schemaHasType($schema, 'array')) {
             $itemsAttrs = $property->getAttributes(ArrayItems::class);
             if (! empty($itemsAttrs)) {
-                $schema['items'] = ['type' => $itemsAttrs[0]->newInstance()->type];
+                $schema['items'] = $this->arrayItemsSchema($itemsAttrs[0]->newInstance()->type);
             }
         }
 
@@ -436,6 +437,26 @@ class JsonSchemaGenerator implements Generator
         ];
 
         return $short;
+    }
+
+    /**
+     * Resolve an #[ArrayItems] item type to its `items` schema. A backed-enum class inlines
+     * the enum's values (no `$ref`); any other token is treated as a scalar JSON type.
+     *
+     * @return array<string, mixed>
+     */
+    protected function arrayItemsSchema(string $type): array
+    {
+        if (enum_exists($type) && is_subclass_of($type, BackedEnum::class)) {
+            $backingType = (new ReflectionEnum($type))->getBackingType()?->getName();
+
+            return [
+                'type' => $backingType === 'int' ? 'integer' : 'string',
+                'enum' => array_map(fn (BackedEnum $case) => $case->value, $type::cases()),
+            ];
+        }
+
+        return ['type' => $type];
     }
 
     protected function mapBuiltin(string $name): string

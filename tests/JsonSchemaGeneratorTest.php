@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use Rushing\LaravelDataSchemas\Generators\JsonSchemaGenerator;
 use Rushing\LaravelDataSchemas\Tests\Fixtures\ContentOutlineItemData;
+use Rushing\LaravelDataSchemas\Tests\Fixtures\EnumArrayData;
 use Rushing\LaravelDataSchemas\Tests\Fixtures\SampleData;
 use Rushing\LaravelDataSchemas\Tests\Fixtures\ScalarArrayData;
 
@@ -216,6 +217,19 @@ class JsonSchemaGeneratorTest extends TestCase
 
         $this->assertEquals('array', $schema['properties']['tags']['type']);
         $this->assertEquals(['type' => 'string'], $schema['properties']['tags']['items']);
+    }
+
+    public function test_it_inlines_enum_values_for_an_array_items_enum_class(): void
+    {
+        $schema = $this->generate(EnumArrayData::class);
+
+        $this->assertEquals('array', $schema['properties']['statuses']['type']);
+        $this->assertEquals(
+            ['type' => 'string', 'enum' => ['draft', 'published']],
+            $schema['properties']['statuses']['items'],
+        );
+        // Inlined, not a $ref — no enum def is hoisted for ArrayItems item types.
+        $this->assertArrayNotHasKey('$defs', $schema);
     }
 
     public function test_for_llm_strict_does_not_emit_root_metadata(): void
