@@ -136,8 +136,9 @@ class JsonSchemaGenerator implements Generator
         if ($this->mode === 'llm_strict') {
             // Strict providers require additionalProperties:false and every property in
             // `required`; properties that would be optional are made nullable instead.
-            // They also reject unsupported keywords like `examples`.
+            // They also reject unsupported keywords (examples, title).
             $schema['additionalProperties'] = false;
+            unset($schema['title']);
 
             foreach ($schema['properties'] as $name => $propSchema) {
                 // Strip keywords strict providers reject (examples) or that we re-express
