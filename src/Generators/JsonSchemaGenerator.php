@@ -10,6 +10,7 @@ use ReflectionEnum;
 use ReflectionNamedType;
 use ReflectionProperty;
 use ReflectionUnionType;
+use Rushing\LaravelDataSchemas\Attributes\ArrayItems;
 use Rushing\LaravelDataSchemas\Attributes\Description;
 use Rushing\LaravelDataSchemas\Attributes\Example;
 use Spatie\LaravelData\Attributes\Validation\Between;
@@ -219,6 +220,15 @@ class JsonSchemaGenerator implements Generator
                 $schema['type'] = $types[0];
             } elseif (count($types) > 1) {
                 $schema['type'] = $types;
+            }
+        }
+
+        // Scalar array item type (string[], int[], …) via #[ArrayItems] — strict
+        // providers require `items` on every array.
+        if ($info['arrayItemRef'] === null && $this->schemaHasType($schema, 'array')) {
+            $itemsAttrs = $property->getAttributes(ArrayItems::class);
+            if (! empty($itemsAttrs)) {
+                $schema['items'] = ['type' => $itemsAttrs[0]->newInstance()->type];
             }
         }
 

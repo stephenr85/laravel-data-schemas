@@ -7,6 +7,7 @@ use ReflectionClass;
 use Rushing\LaravelDataSchemas\Generators\JsonSchemaGenerator;
 use Rushing\LaravelDataSchemas\Tests\Fixtures\ContentOutlineItemData;
 use Rushing\LaravelDataSchemas\Tests\Fixtures\SampleData;
+use Rushing\LaravelDataSchemas\Tests\Fixtures\ScalarArrayData;
 
 class JsonSchemaGeneratorTest extends TestCase
 {
@@ -207,6 +208,14 @@ class JsonSchemaGeneratorTest extends TestCase
         foreach (['examples', 'x-optional', 'x-lazy', 'readOnly', 'nullable'] as $keyword) {
             $this->assertStringNotContainsString($keyword, $json);
         }
+    }
+
+    public function test_it_emits_items_for_a_scalar_array_via_array_items_attribute(): void
+    {
+        $schema = $this->generate(ScalarArrayData::class);
+
+        $this->assertEquals('array', $schema['properties']['tags']['type']);
+        $this->assertEquals(['type' => 'string'], $schema['properties']['tags']['items']);
     }
 
     public function test_for_llm_strict_does_not_emit_root_metadata(): void
