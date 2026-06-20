@@ -147,10 +147,29 @@ return [
     |--------------------------------------------------------------------------
     |
     | Custom mappings for validation attributes to JSON Schema constraints.
-    | These override or extend the default mappings.
+    | These override or extend the default mappings. Consumed by the built-in
+    | ValidationAttributeStrategy below.
     |
     */
     'validation_mapping' => [
         // Example: Max::class => fn($attr) => ['maxLength' => $attr->max],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Property Strategies
+    |--------------------------------------------------------------------------
+    |
+    | An ordered pipeline of SchemaStrategy implementations. Each receives a
+    | reflected property and the schema built so far, and may contribute extra
+    | keywords (the Scribe pattern). The built-in set maps validation attributes;
+    | downstream packages append their own (e.g. content-engine projects its
+    | generation attributes to x-beat/x-ground/x-generate) without subclassing
+    | the generator. `forLlmStrict` strips all `x-*` keywords for the LLM-facing
+    | schema.
+    |
+    */
+    'strategies' => [
+        Rushing\LaravelDataSchemas\Strategies\ValidationAttributeStrategy::class,
     ],
 ];

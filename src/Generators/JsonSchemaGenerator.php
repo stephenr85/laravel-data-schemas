@@ -13,14 +13,9 @@ use ReflectionUnionType;
 use Rushing\LaravelDataSchemas\Attributes\ArrayItems;
 use Rushing\LaravelDataSchemas\Attributes\Description;
 use Rushing\LaravelDataSchemas\Attributes\Example;
-use Spatie\LaravelData\Attributes\Validation\Between;
-use Spatie\LaravelData\Attributes\Validation\Email;
-use Spatie\LaravelData\Attributes\Validation\Enum;
-use Spatie\LaravelData\Attributes\Validation\Max;
-use Spatie\LaravelData\Attributes\Validation\Min;
-use Spatie\LaravelData\Attributes\Validation\Url;
-use Spatie\LaravelData\Attributes\Validation\Uuid;
-use Spatie\LaravelData\Attributes\Validation\ValidationAttribute;
+use Rushing\LaravelDataSchemas\Strategies\SchemaStrategy;
+use Rushing\LaravelDataSchemas\Strategies\SchemaStrategyContext;
+use Rushing\LaravelDataSchemas\Strategies\ValidationAttributeStrategy;
 use Spatie\LaravelData\Data;
 use Spatie\LaravelData\DataCollection;
 use Spatie\LaravelData\Lazy;
@@ -44,6 +39,13 @@ class JsonSchemaGenerator implements Generator
      * @var array<string, true>
      */
     protected array $visited = [];
+
+    /**
+     * Resolved property strategies, memoized per generator instance.
+     *
+     * @var array<int, SchemaStrategy>|null
+     */
+    protected ?array $resolvedStrategies = null;
 
     public function __construct(protected array $config = []) {}
 
@@ -142,8 +144,17 @@ class JsonSchemaGenerator implements Generator
 
             foreach ($schema['properties'] as $name => $propSchema) {
                 // Strip keywords strict providers reject (examples) or that we re-express
-                // through the type union / anyOf below (x-optional, x-lazy, readOnly, nullable).
-                unset($propSchema['examples'], $propSchema['x-optional'], $propSchema['x-lazy'], $propSchema['readOnly'], $propSchema['nullable']);
+                // through the type union / anyOf below (readOnly, nullable). Every `x-*`
+                // vendor keyword is an out-of-band annotation for our own consumers
+                // (x-optional/x-lazy and downstream x-beat/x-ground/x-generate) — never
+                // part of the LLM-facing contract — so strip all of them.
+                unset($propSchema['examples'], $propSchema['readOnly'], $propSchema['nullable']);
+
+                foreach (array_keys($propSchema) as $key) {
+                    if (is_string($key) && str_starts_with($key, 'x-')) {
+                        unset($propSchema[$key]);
+                    }
+                }
 
                 if (! in_array($name, $required, true)) {
                     $propSchema = $this->makeNullable($propSchema);
@@ -249,7 +260,13 @@ class JsonSchemaGenerator implements Generator
             $schema['description'] = $descAttrs[0]->newInstance()->value;
         }
 
-        $this->mapValidationAttributes($property, $schema);
+        // Run the configured property strategies in order (validation mapping by
+        // default; downstream packages may contribute `x-*` keywords). Strategies
+        // run before example inference so any `format` they set informs the baseline.
+        $context = new SchemaStrategyContext($this->config, $this->mode);
+        foreach ($this->strategies() as $strategy) {
+            $schema = $strategy->apply($property, $schema, $context);
+        }
 
         // Examples: explicit #[Example] wins, otherwise infer a baseline for leaves.
         $exampleAttrs = $property->getAttributes(Example::class);
@@ -533,38 +550,86 @@ class JsonSchemaGenerator implements Generator
         return ! empty($descAttrs) ? $descAttrs[0]->newInstance()->value : null;
     }
 
-    protected function mapValidationAttributes(ReflectionProperty $property, array &$schema): void
+    /**
+     * Resolve the ordered property strategies for this generator.
+     *
+     * Resolution order: an explicit `strategies` config slot wins; otherwise the
+     * app's `config('data-schemas.strategies')` (where downstream packages append
+     * their own); falling back to the built-in default set when no container is
+     * available (the generator is constructed bare in unit tests). String entries
+     * are resolved to instances via the container when present, else `new`.
+     *
+     * @return array<int, SchemaStrategy>
+     */
+    protected function strategies(): array
     {
-        $validationAttrs = $property->getAttributes(
-            ValidationAttribute::class,
-            ReflectionAttribute::IS_INSTANCEOF
-        );
-
-        foreach ($validationAttrs as $attr) {
-            $instance = $attr->newInstance();
-            $attrClass = get_class($instance);
-
-            $customMapping = $this->config['validation_mapping'][$attrClass] ?? null;
-            if (is_callable($customMapping)) {
-                $result = $customMapping($instance);
-                if (is_array($result)) {
-                    $schema = array_merge($schema, $result);
-                }
-
-                continue;
-            }
-
-            match ($attrClass) {
-                Max::class => $this->applyMaxConstraint($instance, $schema),
-                Min::class => $this->applyMinConstraint($instance, $schema),
-                Between::class => $this->applyBetweenConstraint($instance, $schema),
-                Email::class => $schema['format'] = 'email',
-                Uuid::class => $schema['format'] = 'uuid',
-                Url::class => $schema['format'] = 'uri',
-                Enum::class => $this->applyEnumConstraint($instance, $schema),
-                default => null,
-            };
+        if ($this->resolvedStrategies !== null) {
+            return $this->resolvedStrategies;
         }
+
+        $configured = $this->config['strategies'] ?? $this->strategyConfigFromContainer();
+
+        if (! is_array($configured)) {
+            $configured = $this->defaultStrategies();
+        }
+
+        $this->resolvedStrategies = array_values(array_filter(array_map(
+            fn ($strategy) => $this->resolveStrategy($strategy),
+            $configured
+        )));
+
+        return $this->resolvedStrategies;
+    }
+
+    /**
+     * The built-in default strategy set, used when no config is reachable.
+     *
+     * @return array<int, class-string<SchemaStrategy>>
+     */
+    protected function defaultStrategies(): array
+    {
+        return [ValidationAttributeStrategy::class];
+    }
+
+    /**
+     * Read the configured strategies from a booted container, tolerating its
+     * absence (bare unit tests construct the generator without one).
+     *
+     * @return array<int, mixed>|null
+     */
+    protected function strategyConfigFromContainer(): ?array
+    {
+        if (! function_exists('config')) {
+            return $this->defaultStrategies();
+        }
+
+        try {
+            $configured = config('data-schemas.strategies');
+        } catch (\Throwable) {
+            return $this->defaultStrategies();
+        }
+
+        return is_array($configured) ? $configured : $this->defaultStrategies();
+    }
+
+    protected function resolveStrategy(SchemaStrategy|string $strategy): ?SchemaStrategy
+    {
+        if ($strategy instanceof SchemaStrategy) {
+            return $strategy;
+        }
+
+        if (function_exists('app')) {
+            try {
+                $resolved = app($strategy);
+                if ($resolved instanceof SchemaStrategy) {
+                    return $resolved;
+                }
+            } catch (\Throwable) {
+                // Fall through to a plain instantiation.
+            }
+        }
+
+        return class_exists($strategy) ? new $strategy : null;
     }
 
     protected function schemaHasType(array $schema, string $needle): bool
@@ -572,69 +637,5 @@ class JsonSchemaGenerator implements Generator
         $type = $schema['type'] ?? null;
 
         return $type === $needle || (is_array($type) && in_array($needle, $type, true));
-    }
-
-    protected function applyMaxConstraint(Max $attr, array &$schema): void
-    {
-        $value = $attr->parameters()[0] ?? null;
-        if ($value === null) {
-            return;
-        }
-
-        if ($this->schemaHasType($schema, 'string')) {
-            $schema['maxLength'] = $value;
-        }
-        if ($this->schemaHasType($schema, 'integer') || $this->schemaHasType($schema, 'number')) {
-            $schema['maximum'] = $value;
-        }
-        if ($this->schemaHasType($schema, 'array')) {
-            $schema['maxItems'] = $value;
-        }
-    }
-
-    protected function applyMinConstraint(Min $attr, array &$schema): void
-    {
-        $value = $attr->parameters()[0] ?? null;
-        if ($value === null) {
-            return;
-        }
-
-        if ($this->schemaHasType($schema, 'string')) {
-            $schema['minLength'] = $value;
-        }
-        if ($this->schemaHasType($schema, 'integer') || $this->schemaHasType($schema, 'number')) {
-            $schema['minimum'] = $value;
-        }
-        if ($this->schemaHasType($schema, 'array')) {
-            $schema['minItems'] = $value;
-        }
-    }
-
-    protected function applyBetweenConstraint(Between $attr, array &$schema): void
-    {
-        $params = $attr->parameters();
-        if (count($params) < 2) {
-            return;
-        }
-
-        if ($this->schemaHasType($schema, 'integer') || $this->schemaHasType($schema, 'number')) {
-            $schema['minimum'] = $params[0];
-            $schema['maximum'] = $params[1];
-        }
-    }
-
-    protected function applyEnumConstraint(Enum $attr, array &$schema): void
-    {
-        $reflection = new ReflectionClass($attr);
-        $enumProperty = $reflection->getProperty('enum');
-        $enumProperty->setAccessible(true);
-        $enumClass = $enumProperty->getValue($attr);
-
-        if (is_string($enumClass) && enum_exists($enumClass) && is_subclass_of($enumClass, BackedEnum::class)) {
-            $schema['enum'] = array_map(
-                fn (BackedEnum $case) => $case->value,
-                $enumClass::cases()
-            );
-        }
     }
 }
