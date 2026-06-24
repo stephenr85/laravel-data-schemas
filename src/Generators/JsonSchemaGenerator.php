@@ -635,7 +635,13 @@ class JsonSchemaGenerator implements Generator
      */
     protected function defaultStrategies(): array
     {
-        return [ValidationAttributeStrategy::class];
+        return [
+            ValidationAttributeStrategy::class,
+            // Versioned-only migration vocabulary projection; a no-op for any
+            // class that does not opt into SchemaIdentity, so the default set
+            // never changes non-migration schema output.
+            \Rushing\LaravelDataSchemas\Strategies\MigrationAttributesStrategy::class,
+        ];
     }
 
     /**

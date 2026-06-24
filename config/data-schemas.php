@@ -198,5 +198,10 @@ return [
     */
     'strategies' => [
         Rushing\LaravelDataSchemas\Strategies\ValidationAttributeStrategy::class,
+        // Projects the migration vocabulary (#[WasNamed]/#[MigrateWith]) to
+        // x-migrate-from / x-migrate. VERSIONED-ONLY: a strict no-op for classes
+        // that do not implement SchemaIdentity, so non-migration output is
+        // unchanged. Stripped by forLlmStrict like every other x-* keyword.
+        Rushing\LaravelDataSchemas\Strategies\MigrationAttributesStrategy::class,
     ],
 ];

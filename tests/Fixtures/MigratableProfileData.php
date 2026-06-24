@@ -1,0 +1,36 @@
+<?php
+
+namespace Rushing\LaravelDataSchemas\Tests\Fixtures;
+
+use Rushing\LaravelDataSchemas\Attributes\MigrateWith;
+use Rushing\LaravelDataSchemas\Attributes\WasNamed;
+use Rushing\LaravelDataSchemas\Contracts\SchemaIdentity;
+use Spatie\LaravelData\Data;
+
+/**
+ * A versioned Data class carrying the migration vocabulary:
+ *  - #[WasNamed] declares a rename -> x-migrate-from
+ *  - #[MigrateWith(class)] pins a custom transform -> x-migrate
+ *  - #[MigrateWith('llm')] opts a field into the host LLM rung -> x-migrate: llm
+ */
+class MigratableProfileData extends Data implements SchemaIdentity
+{
+    public function __construct(
+        #[WasNamed('full_name')]
+        public string $displayName,
+        #[MigrateWith(StubAddressTransform::class)]
+        public string $address,
+        #[MigrateWith(MigrateWith::LLM)]
+        public string $bio,
+    ) {}
+
+    public static function schemaName(): string
+    {
+        return 'people/profile';
+    }
+
+    public static function schemaVersion(): int
+    {
+        return 2;
+    }
+}
