@@ -35,7 +35,7 @@ class DiscoverDataClassesAction
                 continue;
             }
 
-            $finder = (new Finder())
+            $finder = (new Finder)
                 ->files()
                 ->name('*.php')
                 ->in($searchPath);

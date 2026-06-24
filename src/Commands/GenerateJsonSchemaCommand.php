@@ -5,8 +5,6 @@ namespace Rushing\LaravelDataSchemas\Commands;
 use Illuminate\Console\Command;
 use Rushing\LaravelDataSchemas\Actions\DiscoverDataClassesAction;
 use Rushing\LaravelDataSchemas\Actions\GenerateSchemasAction;
-use Rushing\LaravelDataSchemas\Collectors\Collector;
-use Rushing\LaravelDataSchemas\Generators\Generator;
 use Rushing\LaravelDataSchemas\PathGenerators\PathGenerator;
 use Rushing\LaravelDataSchemas\Writers\Writer;
 

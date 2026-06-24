@@ -13,6 +13,7 @@ use ReflectionUnionType;
 use Rushing\LaravelDataSchemas\Attributes\ArrayItems;
 use Rushing\LaravelDataSchemas\Attributes\Description;
 use Rushing\LaravelDataSchemas\Attributes\Example;
+use Rushing\LaravelDataSchemas\Contracts\SchemaIdentity;
 use Rushing\LaravelDataSchemas\Strategies\SchemaStrategy;
 use Rushing\LaravelDataSchemas\Strategies\SchemaStrategyContext;
 use Rushing\LaravelDataSchemas\Strategies\ValidationAttributeStrategy;
@@ -212,13 +213,13 @@ class JsonSchemaGenerator implements Generator
         $schema = [];
 
         if ($info['ref'] !== null) {
-            $schema['$ref'] = '#/$defs/'.$info['ref'];
+            $schema['$ref'] = $info['ref'];
             if ($info['nullable']) {
                 $schema['nullable'] = true;
             }
         } elseif ($info['arrayItemRef'] !== null) {
             $schema['type'] = 'array';
-            $schema['items'] = ['$ref' => '#/$defs/'.$info['arrayItemRef']];
+            $schema['items'] = ['$ref' => $info['arrayItemRef']];
             if ($info['nullable']) {
                 $schema['type'] = ['array', 'null'];
             }
@@ -288,6 +289,10 @@ class JsonSchemaGenerator implements Generator
     /**
      * Walk a property's type union member-by-member, resolving wrapper tokens,
      * nullability, nested refs and a scalar fallback.
+     *
+     * `ref`/`arrayItemRef` are full `$ref` STRINGS — either `#/$defs/Short`
+     * (legacy inlined nodes) or an absolute versioned `$id` (opt-in addressable
+     * nodes).
      *
      * @return array{jsonTypes: string[], ref: ?string, arrayItemRef: ?string, nullable: bool, optional: bool, lazy: bool}
      */
@@ -418,21 +423,39 @@ class JsonSchemaGenerator implements Generator
     }
 
     /**
-     * Hoist a nested Data class into $defs and return its short-name key.
+     * Hoist a nested Data class and return the `$ref` string pointing at it.
+     *
+     * Opt-in addressing: a nested class implementing {@see SchemaIdentity}
+     * projects its OWN absolute versioned `$id` and is referenced by that
+     * absolute `$id` (a 2020-12 bundled resource embedded under `$defs` keyed by
+     * `$id`). A nested class that does NOT opt in keeps the historical
+     * `#/$defs/Short` short-name inlining. A tree may freely mix the two.
      */
     protected function ensureDef(ReflectionClass $class): string
     {
+        $versionedId = $this->versionedId($class);
+
+        if ($versionedId !== null) {
+            if (! isset($this->visited[$versionedId])) {
+                $this->visited[$versionedId] = true;
+                // Embedded resource retains its own $id (offline-portable, re-resolvable).
+                $this->defs[$versionedId] = ['$id' => $versionedId] + $this->buildObjectSchema($class);
+            }
+
+            return $versionedId;
+        }
+
         $short = $class->getShortName();
 
         if (isset($this->visited[$short])) {
-            return $short;
+            return '#/$defs/'.$short;
         }
 
         // Mark before recursing so self-references resolve to the same key.
         $this->visited[$short] = true;
         $this->defs[$short] = $this->buildObjectSchema($class);
 
-        return $short;
+        return '#/$defs/'.$short;
     }
 
     protected function ensureEnumDef(string $enumClass): string
@@ -440,7 +463,7 @@ class JsonSchemaGenerator implements Generator
         $short = (new ReflectionClass($enumClass))->getShortName();
 
         if (isset($this->visited[$short])) {
-            return $short;
+            return '#/$defs/'.$short;
         }
         $this->visited[$short] = true;
 
@@ -453,7 +476,7 @@ class JsonSchemaGenerator implements Generator
             'enum' => array_map(fn (BackedEnum $case) => $case->value, $enumClass::cases()),
         ];
 
-        return $short;
+        return '#/$defs/'.$short;
     }
 
     /**
@@ -538,9 +561,33 @@ class JsonSchemaGenerator implements Generator
         };
     }
 
+    /**
+     * The document `$id`.
+     *
+     * Opt-in versioning: a class implementing {@see SchemaIdentity} emits an
+     * absolute versioned URI carried natively in `$id`
+     * (`<base_uri>/<schemaName>/<schemaVersion>`). Any other class keeps the
+     * historical short-name `$id` — unchanged, backward compatible.
+     */
     protected function generateId(ReflectionClass $class): string
     {
-        return $class->getShortName();
+        return $this->versionedId($class) ?? $class->getShortName();
+    }
+
+    /**
+     * The absolute versioned `$id` for a class that opts into versioning, or
+     * null when it does not implement {@see SchemaIdentity}.
+     */
+    protected function versionedId(ReflectionClass $class): ?string
+    {
+        if (! $class->implementsInterface(SchemaIdentity::class)) {
+            return null;
+        }
+
+        $name = $class->getName();
+        $base = rtrim($this->config['base_uri'] ?? 'https://schemas.splicewire.app', '/');
+
+        return $base.'/'.trim($name::schemaName(), '/').'/'.$name::schemaVersion();
     }
 
     protected function getClassDescription(ReflectionClass $class): ?string

@@ -143,6 +143,33 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Versioned Schema Base URI (opt-in lifecycle)
+    |--------------------------------------------------------------------------
+    |
+    | Base URI for absolute, versioned `$id`s. A Data class that implements
+    | Rushing\LaravelDataSchemas\Contracts\SchemaIdentity opts into versioning:
+    | its `$id` becomes `<base_uri>/<schemaName()>/<schemaVersion()>` and, when
+    | nested, it is referenced by that absolute `$id` instead of `#/$defs/Short`.
+    |
+    | Classes that DO NOT implement SchemaIdentity are unaffected — they keep
+    | the short-name `$id` and `#/$defs/Short` inlining (backward compatible).
+    |
+    */
+    'base_uri' => 'https://schemas.splicewire.app',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Schema Registry Directory
+    |--------------------------------------------------------------------------
+    |
+    | Directory of frozen, committed schema artifacts for the filesystem
+    | SchemaRegistry. Entries are write-once: a changed shape needs a new $id.
+    |
+    */
+    'registry_directory' => resource_path('schemas/registry'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Validation Attribute Mapping
     |--------------------------------------------------------------------------
     |

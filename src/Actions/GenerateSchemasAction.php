@@ -20,7 +20,7 @@ class GenerateSchemasAction
      */
     public function execute(array $classes): SchemaCollection
     {
-        $collection = new SchemaCollection();
+        $collection = new SchemaCollection;
 
         foreach ($classes as $class) {
             foreach ($this->generators as $generator) {
