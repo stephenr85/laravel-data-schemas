@@ -84,4 +84,24 @@ class SchemaRegistryTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $registry->register(['type' => 'object']);
     }
+
+    public function test_it_enumerates_the_versions_registered_under_a_stem(): void
+    {
+        $registry = new FilesystemSchemaRegistry($this->dir);
+        $stem = 'https://schemas.splicewire.app/content/article';
+
+        // Register out of order and across stems to prove filtering + ordering.
+        $registry->register(['$id' => $stem.'/3', 'type' => 'object', 'properties' => ['a' => ['type' => 'string']]]);
+        $registry->register(['$id' => $stem.'/1', 'type' => 'object', 'properties' => ['b' => ['type' => 'string']]]);
+        $registry->register(['$id' => 'https://schemas.splicewire.app/content/author/9', 'type' => 'object', 'properties' => ['c' => ['type' => 'string']]]);
+
+        $this->assertSame([1, 3], $registry->versionsFor($stem));
+    }
+
+    public function test_versions_for_an_unknown_stem_is_empty(): void
+    {
+        $registry = new FilesystemSchemaRegistry($this->dir);
+
+        $this->assertSame([], $registry->versionsFor('https://schemas.splicewire.app/nope'));
+    }
 }

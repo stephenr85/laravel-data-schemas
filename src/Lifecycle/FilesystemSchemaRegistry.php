@@ -3,6 +3,7 @@
 namespace Rushing\LaravelDataSchemas\Lifecycle;
 
 use InvalidArgumentException;
+use Rushing\LaravelDataSchemas\Contracts\EnumeratesVersions;
 use Rushing\LaravelDataSchemas\Contracts\SchemaRegistry;
 
 /**
@@ -17,7 +18,7 @@ use Rushing\LaravelDataSchemas\Contracts\SchemaRegistry;
  * Resolves any `$id` at any depth — a top-level document or a nested addressable
  * node — because every addressable resource is stored under its own `$id`.
  */
-class FilesystemSchemaRegistry implements SchemaRegistry
+class FilesystemSchemaRegistry implements EnumeratesVersions, SchemaRegistry
 {
     public function __construct(
         protected string $directory,
@@ -83,6 +84,34 @@ class FilesystemSchemaRegistry implements SchemaRegistry
         sort($ids);
 
         return $ids;
+    }
+
+    /**
+     * The version integers registered under `$stem`, ascending and de-duplicated.
+     * The committed store has no index, so this parses its known `$id`s: an id
+     * splits at its last `/` into a stem and a trailing integer version; ids whose
+     * stem matches and whose tail is a non-negative integer contribute a version.
+     */
+    public function versionsFor(string $stem): array
+    {
+        $versions = [];
+
+        foreach ($this->ids() as $id) {
+            $pos = strrpos($id, '/');
+            if ($pos === false || substr($id, 0, $pos) !== $stem) {
+                continue;
+            }
+
+            $tail = substr($id, $pos + 1);
+            if ($tail !== '' && ctype_digit($tail)) {
+                $versions[] = (int) $tail;
+            }
+        }
+
+        $versions = array_values(array_unique($versions));
+        sort($versions);
+
+        return $versions;
     }
 
     /**
