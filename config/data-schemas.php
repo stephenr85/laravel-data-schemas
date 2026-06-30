@@ -1,5 +1,12 @@
 <?php
 
+use Rushing\LaravelDataSchemas\Collectors\DataObjectCollector;
+use Rushing\LaravelDataSchemas\Generators\JsonSchemaGenerator;
+use Rushing\LaravelDataSchemas\PathGenerators\DefaultPathGenerator;
+use Rushing\LaravelDataSchemas\Strategies\MigrationAttributesStrategy;
+use Rushing\LaravelDataSchemas\Strategies\ValidationAttributeStrategy;
+use Rushing\LaravelDataSchemas\Writers\JsonSchemaWriter;
+
 return [
     /*
     |--------------------------------------------------------------------------
@@ -37,7 +44,7 @@ return [
     |
     */
     'collectors' => [
-        Rushing\LaravelDataSchemas\Collectors\DataObjectCollector::class,
+        DataObjectCollector::class,
     ],
 
     /*
@@ -50,7 +57,7 @@ return [
     |
     */
     'generators' => [
-        Rushing\LaravelDataSchemas\Generators\JsonSchemaGenerator::class,
+        JsonSchemaGenerator::class,
     ],
 
     /*
@@ -62,7 +69,7 @@ return [
     | You can implement your own PathGenerator interface.
     |
     */
-    'path_generator' => Rushing\LaravelDataSchemas\PathGenerators\DefaultPathGenerator::class,
+    'path_generator' => DefaultPathGenerator::class,
 
     /*
     |--------------------------------------------------------------------------
@@ -106,7 +113,7 @@ return [
     | Handles persistence of JSON Schema files to disk.
     |
     */
-    'writer' => Rushing\LaravelDataSchemas\Writers\JsonSchemaWriter::class,
+    'writer' => JsonSchemaWriter::class,
 
     /*
     |--------------------------------------------------------------------------
@@ -197,11 +204,11 @@ return [
     |
     */
     'strategies' => [
-        Rushing\LaravelDataSchemas\Strategies\ValidationAttributeStrategy::class,
+        ValidationAttributeStrategy::class,
         // Projects the migration vocabulary (#[WasNamed]/#[MigrateWith]) to
         // x-migrate-from / x-migrate. VERSIONED-ONLY: a strict no-op for classes
         // that do not implement SchemaIdentity, so non-migration output is
         // unchanged. Stripped by forLlmStrict like every other x-* keyword.
-        Rushing\LaravelDataSchemas\Strategies\MigrationAttributesStrategy::class,
+        MigrationAttributesStrategy::class,
     ],
 ];
